@@ -84,7 +84,7 @@ func (b *Blob) Upload(ctx context.Context) error {
 // Download a blob in full
 func (b *Blob) Download(ctx context.Context) error {
 	log.Println("!!!! DOWNLOADING", *b.name)
-	resp, err := b.url.Download(ctx, 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
+	resp, err := b.url.Download(ctx, int64(0), int64(azblob.CountToEnd), azblob.BlobAccessConditions{}, false, azblob.ClientProvidedKeyOptions{})
 
 	opts := azblob.RetryReaderOptions{
 		MaxRetryRequests: maxRetry,

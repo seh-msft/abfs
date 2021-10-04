@@ -19,24 +19,19 @@ import (
 const (
 	maxChildren = 32  // Maxmimum number of children a directory can have
 	maxProtoBuf = 256 // Maximum size of the buffer for storing directory contents
-)
-
-var (
-	// This implies only one `ls` can happen at a time
-	// The poor implementation of the offset is due to how Readdir() is defined as per below
-	ReaddirOffset int       // Tracks offset state for a dir `ls`
-	reset         chan bool // Lock channel for resetting offset
+	infoBuf     = 10  // Buffer size for file info
 )
 
 // Represents a file in the file system
 type File struct {
-	parent   *File     // Parent directory
-	srv      *Server   // Server we run under (could be global?)
-	name     string    // Name of the file singleton `/f/a` is `a`
-	dir      bool      // Are we a directory?
-	last     time.Time // Last modified time
-	*Blob              // Some kind of contents to the file
-	Children []*File   // Our child nodes (if a dirrectory)
+	parent   *File            // Parent directory
+	srv      *Server          // Server we run under (could be global?)
+	name     string           // Name of the file singleton `/f/a` is `a`
+	dir      bool             // Are we a directory?
+	last     time.Time        // Last modified time
+	*Blob                     // Some kind of contents to the file
+	Children []*File          // Our child nodes (if a dirrectory)
+	info     chan os.FileInfo // Info channel for Readdir()
 }
 
 // Creates a VFile out of a File - See: vfile.go
@@ -46,12 +41,14 @@ func (f *File) VF() VFile {
 
 // Create a new tree with a stub root directory
 func NewTree(srv *Server) *File {
-	return &File{
+	f := &File{
 		srv:      srv,
 		name:     "/",
 		dir:      true,
 		Children: make([]*File, 0, maxChildren),
 	}
+
+	return f
 }
 
 // Synchronize our tree with Azure remote
@@ -189,7 +186,6 @@ func (t *File) NewChild(name string, isDir bool) *File {
 	child.Blob = NewBlob(&child.name, t.srv.container)
 
 	t.Children = append(t.Children, child)
-
 	return child
 }
 
@@ -212,9 +208,21 @@ func (t *File) Len() uint64 {
 
 /* Interface fulfillment for ReaderAt, WriterAt, Closer, etc. */
 
+// Open file
+// UNUSED by styx
+// This will never be called
+func (f *File) Open() error {
+	log.Println("!!!! OPEN")
+	return nil
+}
+
 // Close file
-func (f File) Close() error {
+func (f *File) Close() error {
 	// TODO - anything? maybe sync up to azure since we know we're done?
+	if f.IsDir() {
+		f.reloadInfo()
+	}
+	log.Println("!!!! CLOSE")
 	return nil
 }
 
@@ -307,9 +315,10 @@ func (f File) Size() int64 {
 	log.Println("!!!! SIZE")
 
 	if f.IsDir() {
-		// A directory does not have size
-		// This seems to work
-		return 0
+		// Size is number of children
+		// Seems to work
+		// Previously: 0
+		return int64(len(f.Children))
 	}
 
 	// TODO - get this info from azure, not the buffer, for lazy loading
@@ -357,6 +366,18 @@ func (f File) Stat() os.FileInfo {
 	return f
 }
 
+// Reload the channel for Readdir()
+func (f *File) reloadInfo() {
+	log.Println("« Reloading info for file: ", f.Name())
+	f.info = make(chan os.FileInfo, infoBuf)
+	go func() {
+		for i := 0; i < len(f.Children); i++ {
+			f.info <- f.Children[i]
+		}
+		close(f.info)
+	}()
+}
+
 // Styx says we must implement Readdir() or marshal directory information ourselves through ReadAt()
 // See: https://pkg.go.dev/aqwari.net/net/styx?tab=doc#Directory
 func (f *File) Readdir(n int) ([]os.FileInfo, error) {
@@ -368,32 +389,22 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, io.EOF
 	}
 
-	// Occurs when we have finished reading, resets offset
-	if ReaddirOffset >= len(f.Children) {
-		defer func() {
-			reset <- true
-		}()
-		return nil, io.EOF
+	// If channel is nil, push into channel
+	// We will close when done
+
+	if f.info == nil {
+		f.reloadInfo()
 	}
 
-	// List everything in a directory
-	if n <= 0 {
-		n = len(f.Children)
+	var err error
+	fi := make([]os.FileInfo, 0, infoBuf)
+	for i := 0; i < n; i++ {
+		s, ok := <-f.info
+		if !ok {
+			err = io.EOF
+			break
+		}
+		fi = append(fi, s)
 	}
-
-	var err error = nil
-	info := make([]os.FileInfo, 0, n)
-
-	var i int
-	for i = ReaddirOffset; i < n && i < len(f.Children); i++ {
-		info = append(info, f.Children[i])
-	}
-
-	ReaddirOffset = i
-
-	if ReaddirOffset >= len(f.Children) {
-		err = io.EOF
-	}
-
-	return info, err
+	return fi, err
 }

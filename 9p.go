@@ -22,14 +22,6 @@ type Server struct {
 
 // Init the server and its file system - call only once
 func (s *Server) Initialize() {
-	reset = make(chan bool, 1)
-	go func() {
-		for {
-			<-reset
-			ReaddirOffset = 0
-		}
-	}()
-
 	s.File = NewTree(s)
 }
 
